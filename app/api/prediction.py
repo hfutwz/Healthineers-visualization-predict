@@ -12,8 +12,9 @@ from app.services import training_service
 
 router = APIRouter()
 
-# ─── 全局模型实例（启动时加载）──────────────────────────────
+# ─── 全局模型实例 + 版本缓存（启动时加载）───────────────────
 _model: Optional[TraumaStatisticalModel] = None
+_model_version: str = "unknown"   # 缓存版本号，避免每次预测都读磁盘
 
 
 def get_model() -> TraumaStatisticalModel:
@@ -26,25 +27,26 @@ def get_model() -> TraumaStatisticalModel:
 
 
 def reload_model():
-    """训练完成后重新加载模型到内存"""
-    global _model
+    """训练完成后重新加载模型到内存，同步更新版本缓存"""
+    global _model, _model_version
     _model = training_service.load_current_model()
+    status = training_service.get_model_status()
+    _model_version = status.get('version', 'unknown')
 
 
 # ─── 格式化工具 ──────────────────────────────────────────────
 
 def _fmt(raw: dict) -> dict:
-    """统一格式化伤因概率响应"""
+    """统一格式化伤因概率响应（使用内存缓存的版本号，避免磁盘 IO）"""
     proba = {CAUSE_NAMES[c]: round(raw.get(c, 0.0), 4) for c in range(5)}
     top = max(proba, key=proba.get)
-    meta = training_service.get_model_status()
     return {
         'probabilities': proba,
         'top_cause': top,
         'confidence': raw.get('_confidence', 'medium'),
         'sample_n': raw.get('_sample_n', 0),
         'is_fallback': raw.get('_fallback', False),
-        'model_version': meta.get('version', 'unknown'),
+        'model_version': _model_version,
     }
 
 
@@ -85,14 +87,22 @@ class ComprehensiveQuery(BaseModel):
 
 @router.post("/predict/comprehensive", summary="T1: 综合预测（区域+时段+季节）")
 def comprehensive(body: ComprehensiveQuery):
+    """
+    优先级：区域+时段+季节 > 区域+时段 > 时段+季节 > 时段
+    地区数据稀疏时自动降级，附带置信度说明
+    """
     m = get_model()
     if body.district and body.season is not None:
-        raw = m.predict_by_district_period(body.district, body.time_period)
+        # 三维：区域 + 时段 + 季节（内部逐级降级到区域+时段）
+        raw = m.predict_by_district_period_season(body.district, body.time_period, body.season)
     elif body.district:
+        # 二维：区域 + 时段
         raw = m.predict_by_district_period(body.district, body.time_period)
     elif body.season is not None:
+        # 二维：时段 + 季节
         raw = m.predict_by_period_season(body.time_period, body.season)
     else:
+        # 一维：仅时段
         raw = m.predict_by_period(body.time_period)
     return _fmt(raw)
 
