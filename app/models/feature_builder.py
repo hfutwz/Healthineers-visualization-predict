@@ -35,7 +35,7 @@ def _normalize_cause(val) -> int:
     return 4   # 其他
 
 
-def _resolve_district(val) -> str | None:
+def _resolve_district(val) -> "str | None":
     return extract_district(str(val)) if val else None
 
 
@@ -73,6 +73,6 @@ def build_record(raw_row: dict) -> dict:
     return result
 
 
-def feature_names() -> list[str]:
+def feature_names() -> "list[str]":
     """返回当前所有特征名（不含目标变量）"""
     return [name for name, *_ in FEATURE_CONFIG if name != 'injury_cause_category']

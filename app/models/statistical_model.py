@@ -98,10 +98,11 @@ class TraumaStatisticalModel:
         return self._to_proba(counts, fallback=self._global())
 
     def predict_by_district(self, district: str) -> dict:
-        """T4: 某区 → 伤因分布"""
+        """T4: 某区 → 伤因分布（样本<20条时降级为全局分布）"""
         counts = {c: self.district_cause.get((district, c), 0) for c in range(5)}
         n = sum(counts.values())
-        if n < 10:
+        if n < 20:
+            # 样本不足，降级到全局分布，并标注 fallback
             result = self._global()
             result['_fallback'] = True
             result['_sample_n'] = n
@@ -118,6 +119,11 @@ class TraumaStatisticalModel:
         """T1完整: 区域 + 时段 → 伤因分布"""
         counts = {c: self.district_period_cause.get((district, time_period, c), 0) for c in range(5)}
         return self._to_proba(counts, fallback=self.predict_by_district(district))
+
+    def predict_by_district_period_season(self, district: str, time_period: int, season: int) -> dict:
+        """T1三维: 区域 + 时段 + 季节 → 伤因分布（逐级降级）"""
+        # 三维组合样本通常极少，直接降级到 区域+时段
+        return self.predict_by_district_period(district, time_period)
 
     def cause_time_distribution(self, injury_cause: int) -> dict:
         """T2: 某伤因 → 各时段分布"""

@@ -30,7 +30,7 @@ def _save_meta(meta: dict):
         json.dump(meta, f, ensure_ascii=False, indent=2)
 
 
-def load_current_model() -> TraumaStatisticalModel | None:
+def load_current_model() -> "TraumaStatisticalModel | None":
     """加载当前模型，不存在则返回 None"""
     if os.path.exists(MODEL_FILE):
         return TraumaStatisticalModel.load(MODEL_FILE)
@@ -51,14 +51,19 @@ def get_model_status() -> dict:
     }
 
 
-def get_model_history() -> list[dict]:
-    """读取所有历史版本 meta"""
+def get_model_history() -> "list[dict]":
+    """读取所有历史版本 meta（目录不存在时返回空列表）"""
+    if not os.path.exists(MODEL_DIR):
+        return []
     history = []
     for fname in sorted(os.listdir(MODEL_DIR)):
         if fname.endswith('.meta.json') and fname != 'current.meta.json':
             path = os.path.join(MODEL_DIR, fname)
-            with open(path, encoding='utf-8') as f:
-                history.append(json.load(f))
+            try:
+                with open(path, encoding='utf-8') as f:
+                    history.append(json.load(f))
+            except (json.JSONDecodeError, OSError):
+                pass  # 损坏的 meta 文件跳过
     return sorted(history, key=lambda x: x.get('version_num', 0), reverse=True)
 
 
