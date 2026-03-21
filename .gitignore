@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+.venv/
+*.egg-info/
+dist/
+build/
+
+# 环境变量（含敏感信息，不提交）
+.env
+.env.local
+.env.*.local
+
+# 模型文件（体积大，按需提交）
+models/*.pkl
+models/*.meta.json
+# 但保留目录结构
+!models/.gitkeep
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+._*
+
+# 日志
+*.log
+logs/
+
+# 测试覆盖率
+.coverage
+htmlcov/
+.pytest_cache/
