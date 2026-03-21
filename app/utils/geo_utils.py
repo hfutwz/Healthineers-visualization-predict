@@ -59,7 +59,7 @@ ROAD_DISTRICT_MAP = {
 INVALID_KEYWORDS = {'无', '未知', '未备注', '自行', '家', '家中', '*', '0', '(跳过)'}
 
 
-def extract_district(text: str) -> str | None:
+def extract_district(text: str) -> "str | None":
     """
     从地址文本解析上海行政区
     返回：区名（如"宝山区"）或 None（无法识别）
@@ -84,8 +84,13 @@ def extract_district(text: str) -> str | None:
             return d
 
     # 2. 路名/地名 → 区映射
+    # 防止"静安路"被误判为静安区：若关键词 <= 2字 且文本是"关键词+路/街/道"结构，跳过
+    import re as _re
     for keyword, district in ROAD_DISTRICT_MAP.items():
         if keyword in text:
+            # 防误判：短关键词 + 紧跟"路/街/道"，说明是路名而非区域名
+            if len(keyword) <= 2 and _re.search(rf'{_re.escape(keyword)}[路街道]', text):
+                continue
             return district
 
     return None
