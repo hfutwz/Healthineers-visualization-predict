@@ -1,6 +1,6 @@
 """
 预测 API 路由
-8 个接口：6个预测 + 2个模型管理
+10 个接口：6个预测 + 4个模型管理（含版本控制和增量训练）
 """
 
 from typing import Optional
@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from app.models.statistical_model import TraumaStatisticalModel, CAUSE_NAMES
 from app.services import training_service
+from app.services import base_training_service
 
 router = APIRouter()
 
@@ -123,25 +124,114 @@ def district_distribution(
 
 @router.get("/api/model/status", summary="查看当前模型状态")
 def model_status():
-    return training_service.get_model_status()
+    """获取模型状态（兼容旧版 + 新版版本信息）"""
+    status = training_service.get_model_status()
+    version_info = base_training_service.get_version_info()
+    
+    return {
+        **status,
+        'version_detail': version_info,
+        'mode': version_info.get('mode', 'unknown'),
+        'base_samples': version_info.get('base_samples', 0),
+        'incremental_samples': version_info.get('incremental_samples', 0)
+    }
 
 
-@router.post("/api/model/train", summary="全量训练（首次初始化）")
-def model_train():
-    result = training_service.train_full()
-    if result.get('status') == 'success':
-        reload_model()
-    return result
+@router.get("/api/model/version", summary="获取版本详细信息")
+def model_version():
+    """获取模型版本信息（供前端显示）"""
+    return base_training_service.get_version_info()
 
 
-@router.post("/api/model/trigger-update", summary="增量更新（导入新数据后调用）")
+@router.post("/api/model/train", summary="训练模型（支持基础和增量）")
+def model_train(
+    source: str = Query("both", enum=["excel", "database", "both"], description="训练数据源"),
+    force: bool = Query(False, description="强制重新训练")
+):
+    """
+    训练模型
+    - source=excel: 仅使用 Excel 数据训练基础模型（会清空已有增量）
+    - source=database: 仅使用数据库数据（保留）
+    - source=both: 基础模型 + 数据库增量（默认，推荐）
+    """
+    try:
+        if source == "excel":
+            # 仅 Excel 基础训练
+            result = base_training_service.train_from_excel(force=force)
+            if result.get('status') == 'trained':
+                reload_model()
+            return result
+            
+        elif source == "both":
+            # 基础 + 增量
+            # 1. 确保基础模型存在
+            if not os.path.exists(base_training_service.BASE_MODEL_FILE) or force:
+                base_result = base_training_service.train_from_excel(force=force)
+                if base_result.get('status') not in ['trained', 'skipped']:
+                    return base_result
+            
+            # 2. 执行增量训练
+            result = base_training_service.incremental_train_from_db(force=force)
+            if result.get('status') == 'incremental_trained':
+                reload_model()
+            return result
+            
+        else:
+            # 仅数据库（原有逻辑）
+            result = training_service.train_full()
+            if result.get('status') == 'success':
+                reload_model()
+            return result
+            
+    except Exception as e:
+        return {'status': 'error', 'message': str(e)}
+
+
+@router.post("/api/model/train-base", summary="仅从 Excel 训练基础模型")
+def train_base(force: bool = Query(False, description="强制重新训练")):
+    """独立接口：仅从 Excel 训练基础模型"""
+    try:
+        result = base_training_service.train_from_excel(force=force)
+        if result.get('status') == 'trained':
+            reload_model()
+        return result
+    except Exception as e:
+        return {'status': 'error', 'message': str(e)}
+
+
+@router.post("/api/model/train-incremental", summary="增量训练（基础+数据库新数据）")
+def train_incremental(force: bool = Query(False, description="强制训练")):
+    """
+    增量训练：基础模型 + 数据库新增数据
+    供 Java 后端 / 前端 点击按钮调用
+    """
+    try:
+        # 检查基础模型
+        if not os.path.exists(base_training_service.BASE_MODEL_FILE):
+            return {
+                'status': 'error',
+                'message': '基础模型不存在，请先执行基础训练或调用 /api/model/train?source=excel'
+            }
+        
+        result = base_training_service.incremental_train_from_db(force=force)
+        if result.get('status') == 'incremental_trained':
+            reload_model()
+        return result
+        
+    except Exception as e:
+        return {'status': 'error', 'message': str(e)}
+
+
+@router.post("/api/model/trigger-update", summary="增量更新（导入新数据后调用，兼容旧版）")
 def trigger_update():
-    result = training_service.incremental_update()
-    if result.get('status') == 'success':
-        reload_model()
-    return result
+    """兼容旧版的增量更新接口"""
+    return train_incremental(force=False)
 
 
 @router.get("/api/model/history", summary="历史版本列表")
 def model_history():
     return training_service.get_model_history()
+
+
+# ─── 辅助导入 ────────────────────────────────────────────
+import os  # 用于文件检查
