@@ -36,6 +36,7 @@ def _load_version() -> Dict[str, Any]:
         'base_samples': 0,
         'incremental_samples': 0,
         'total_samples': 0,
+        'last_db_count': 0,   # 上次同步时数据库的记录数（用于判断是否有新数据）
         'last_training': None,
         'mode': None,  # 'base' 或 'incremental'
         'created_at': None
@@ -223,7 +224,11 @@ def train_from_excel(excel_path: Optional[str] = None, force: bool = False) -> D
 
 def incremental_train_from_db(force: bool = False) -> Dict[str, Any]:
     """
-    增量训练：基础模型 + 数据库新数据
+    增量训练：Excel 基础数据 + 数据库全量数据，合并后重新训练
+    
+    修复点：
+    1. 用 last_db_count 追踪上次同步时的数据库记录数，正确判断是否有新数据
+    2. 合并 Excel 基础数据 + 数据库数据一起训练，避免数据库数据少时模型退化
     
     Args:
         force: 是否强制训练（即使无新数据）
@@ -238,26 +243,49 @@ def incremental_train_from_db(force: bool = False) -> Dict[str, Any]:
     # 加载当前版本信息
     version_info = _load_version()
     
-    # 获取当前数据库记录数
+    # 用 last_db_count 判断数据库是否有新数据（修复：不再用 incremental_samples 做判断）
     current_db_count = count_injury_records()
-    last_total = version_info.get('total_samples', 0)
-    new_samples = current_db_count - (version_info.get('incremental_samples', 0))
+    last_db_count = version_info.get('last_db_count', 0)
+    new_db_samples = current_db_count - last_db_count
     
     # 检查是否有新数据
-    if new_samples <= 0 and not force:
+    if new_db_samples <= 0 and not force:
         return {
             'status': 'no_new_data',
-            'message': '数据库中无新增数据',
+            'message': f'数据库无新增数据（上次同步时 {last_db_count} 条，当前仍为 {current_db_count} 条）',
             'current_version': version_info.get('current_version'),
-            'total_samples': version_info.get('total_samples', 0)
+            'total_samples': version_info.get('total_samples', 0),
+            'last_db_count': last_db_count,
+            'current_db_count': current_db_count
         }
     
-    # 从数据库读取新数据（全量读取，因为 incremental 需要重新统计）
-    raw_records = fetch_all_training_data()
-    records = [build_record(r) for r in raw_records]
+    # ── 合并 Excel 基础数据 + 数据库数据（修复：确保基础 2000 条始终参与训练）──
+    excel_records: List[Dict] = []
+    if os.path.exists(DEFAULT_EXCEL_PATH):
+        try:
+            df = pd.read_excel(DEFAULT_EXCEL_PATH)
+            excel_records = _parse_excel_data(df)
+        except Exception as e:
+            # Excel 读取失败不阻断增量训练，记录警告
+            print(f"[WARNING] 读取 Excel 基础数据失败，本次仅使用数据库数据: {e}")
+    
+    # 从数据库读取全量数据
+    db_raw_records = fetch_all_training_data()
+    
+    # 合并：Excel 基础数据 + 数据库数据（数据库数据覆盖重复 patient_id）
+    # 用 patient_id 去重，数据库数据优先（更新的记录以数据库为准）
+    db_patient_ids = {str(r.get('patient_id', '')) for r in db_raw_records}
+    excel_only = [r for r in excel_records if str(r.get('patient_id', '')) not in db_patient_ids]
+    all_raw = excel_only + db_raw_records
+    
+    # 特征构建
+    records = [build_record(r) for r in all_raw]
     records = [r for r in records if r is not None]
     
-    # 训练模型（全量重新训练，基于基础数据 + 新增数据）
+    if len(records) == 0:
+        raise ValueError("合并后无有效训练记录")
+    
+    # 训练模型
     model = TraumaStatisticalModel()
     model.fit(records)
     
@@ -271,19 +299,18 @@ def incremental_train_from_db(force: bool = False) -> Dict[str, Any]:
     current_model_file = os.path.join(MODEL_DIR, "current.pkl")
     model.save(current_model_file)
     
-    # 计算样本数
-    base_samples = version_info.get('base_samples', 0)
-    incremental_samples = len(records) - base_samples
-    if incremental_samples < 0:
-        incremental_samples = len(records)  # 异常情况，全部算增量
-        base_samples = 0
+    # 统计样本数
+    base_samples = version_info.get('base_samples', 0)  # Excel 原始基础数量
+    incremental_samples = len(db_raw_records)            # 数据库贡献的样本数
+    total_samples = len(records)                          # 实际合并后训练样本数
     
-    # 更新版本信息
+    # 更新版本信息（修复：记录 last_db_count）
     version_info.update({
         'current_version': incremental_version,
         'incremental_version': incremental_version,
         'incremental_samples': incremental_samples,
-        'total_samples': len(records),
+        'total_samples': total_samples,
+        'last_db_count': current_db_count,   # 记录本次同步时数据库记录数
         'last_training': datetime.datetime.now().isoformat(),
         'mode': 'incremental'
     })
@@ -291,17 +318,16 @@ def incremental_train_from_db(force: bool = False) -> Dict[str, Any]:
     
     # 更新 meta 文件
     meta_file = os.path.join(MODEL_DIR, "current.meta.json")
-    version_num = version_info.get('base_version', 'BASE_').split('_')[1]
     try:
-        version_num = int(version_num) + 1
-    except:
+        version_num = int(version_info.get('base_version', 'BASE_0').split('_')[1]) + 1
+    except (IndexError, ValueError):
         version_num = 2
     
     meta = {
         'version': incremental_version,
         'version_num': version_num,
-        'trained_count': len(records),
-        'delta': incremental_samples,
+        'trained_count': total_samples,
+        'delta': new_db_samples,
         'district_count': model.meta.get('district_count', 0),
         'created_at': datetime.datetime.now().isoformat(),
         'metrics': {},
@@ -317,9 +343,11 @@ def incremental_train_from_db(force: bool = False) -> Dict[str, Any]:
         'incremental_version': incremental_version,
         'base_samples': base_samples,
         'incremental_samples': incremental_samples,
-        'total_samples': len(records),
-        'new_db_samples': new_samples,
-        'message': f'增量训练完成，基础{base_samples}条 + 增量{incremental_samples}条 = 共{len(records)}条'
+        'total_samples': total_samples,
+        'new_db_samples': new_db_samples,
+        'message': (
+            f'增量训练完成，Excel基础{len(excel_only)}条 + 数据库{incremental_samples}条 = 共{total_samples}条'
+        )
     }
 
 

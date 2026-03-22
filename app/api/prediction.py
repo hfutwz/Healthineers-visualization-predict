@@ -3,6 +3,7 @@
 10 个接口：6个预测 + 4个模型管理（含版本控制和增量训练）
 """
 
+import os
 from typing import Optional
 from fastapi import APIRouter, Query, HTTPException
 from pydantic import BaseModel
@@ -231,7 +232,3 @@ def trigger_update():
 @router.get("/api/model/history", summary="历史版本列表")
 def model_history():
     return training_service.get_model_history()
-
-
-# ─── 辅助导入 ────────────────────────────────────────────
-import os  # 用于文件检查
