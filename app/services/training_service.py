@@ -39,10 +39,12 @@ def load_current_model() -> "TraumaStatisticalModel | None":
 
 def get_model_status() -> dict:
     meta = _load_meta()
+    trained = meta.get('trained_count', 0)
     return {
         'version': meta.get('version'),
         'version_num': meta.get('version_num', 0),
-        'trained_count': meta.get('trained_count', 0),
+        'trained_count': trained,
+        'sample_count': trained,          # 前端 modelStatus.sample_count 别名
         'district_count': meta.get('district_count', 0),
         'created_at': meta.get('created_at'),
         'metrics': meta.get('metrics', {}),
