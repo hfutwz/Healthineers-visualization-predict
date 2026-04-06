@@ -37,7 +37,9 @@ def reload_model():
 # ─── 格式化工具 ──────────────────────────────────────────────
 
 def _normalize_district_param(district: str) -> str:
-    d = (district or '').strip()
+    from urllib.parse import unquote
+    # URL 解码，处理可能的编码字符
+    d = unquote(district or '').strip()
     if d not in ALLOWED_DISTRICTS:
         raise HTTPException(status_code=422, detail=f"地区不在允许列表内: {district!r}")
     return d
@@ -160,9 +162,10 @@ def district_profile(
 
 @router.get("/predict/district-by-period-cause", summary="类型4: 时段+伤因→地区分布（支持全选）")
 def district_by_period_cause(
-    time_period: Optional[int] = Query(None, ge=0, le=5, description="不传表示全部时段"),
-    injury_cause: Optional[int] = Query(None, ge=0, le=4, description="不传表示全部伤因"),
+    time_period: Optional[int] = Query(default=None, ge=0, le=5, description="不传表示全部时段"),
+    injury_cause: Optional[int] = Query(default=None, ge=0, le=4, description="不传表示全部伤因"),
 ):
+    """时段和伤因均可选，不传表示查询全部"""
     return get_model().district_by_period_cause_optional(time_period, injury_cause)
 
 
