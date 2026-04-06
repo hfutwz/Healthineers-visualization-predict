@@ -113,18 +113,25 @@ def comprehensive(body: ComprehensiveQuery):
     return _fmt(raw)
 
 
-@router.get("/predict/time-distribution", summary="T2: 伤因→时段/季节分布")
+@router.get("/predict/time-distribution", summary="T2: 伤因→时段/季节分布（injury_cause=null 表示全部）")
 def time_distribution(
-    injury_cause: int = Query(..., ge=0, le=4, description="0交通/1高坠/2机械/3跌倒/4其他"),
+    injury_cause: Optional[int] = Query(None, ge=0, le=4, description="0交通/1高坠/2机械/3跌倒/4其他，不传表示全部伤因"),
 ):
     m = get_model()
     from app.models.statistical_model import TIME_PERIOD_NAMES, SEASON_NAMES
-    period_raw = m.cause_time_distribution(injury_cause)
-    season_raw = m.cause_season_distribution(injury_cause)
+    if injury_cause is None:
+        # 全选：汇总所有伤因的时段/季节分布
+        period_raw = m.all_causes_time_distribution()
+        season_raw = m.all_causes_season_distribution()
+        cause_label = '全部'
+    else:
+        period_raw = m.cause_time_distribution(injury_cause)
+        season_raw = m.cause_season_distribution(injury_cause)
+        cause_label = CAUSE_NAMES[injury_cause]
     return {
         'period': {TIME_PERIOD_NAMES[p]: v for p, v in period_raw.items()},
         'season': {SEASON_NAMES[s]: v for s, v in season_raw.items()},
-        'cause': CAUSE_NAMES[injury_cause],
+        'cause': cause_label,
     }
 
 
@@ -135,24 +142,28 @@ def district_distribution(
     return get_model().district_distribution(injury_cause)
 
 
-@router.get("/predict/district-profile", summary="类型3: 地区→时段/季节/伤因分布")
+@router.get("/predict/district-profile", summary="类型3: 地区→时段/季节/伤因分布（district=null 表示全市）")
 def district_profile(
-    district: str = Query(..., description="上海行政区"),
+    district: Optional[str] = Query(None, description="上海行政区，不传表示全市汇总"),
 ):
-    d = _normalize_district_param(district)
     m = get_model()
-    out = m.district_profile(d)
-    if not out:
-        raise HTTPException(status_code=404, detail=f"地区 {d} 无统计数据")
+    if district is None or not district.strip():
+        # 全选：全市汇总
+        out = m.district_profile_all()
+    else:
+        d = _normalize_district_param(district)
+        out = m.district_profile(d)
+        if not out:
+            raise HTTPException(status_code=404, detail=f"地区 {d} 无统计数据")
     return out
 
 
-@router.get("/predict/district-by-period-cause", summary="类型4: 时段+伤因→地区分布")
+@router.get("/predict/district-by-period-cause", summary="类型4: 时段+伤因→地区分布（支持全选）")
 def district_by_period_cause(
-    time_period: int = Query(..., ge=0, le=5),
-    injury_cause: int = Query(..., ge=0, le=4),
+    time_period: Optional[int] = Query(None, ge=0, le=5, description="不传表示全部时段"),
+    injury_cause: Optional[int] = Query(None, ge=0, le=4, description="不传表示全部伤因"),
 ):
-    return get_model().district_by_period_cause(time_period, injury_cause)
+    return get_model().district_by_period_cause_optional(time_period, injury_cause)
 
 
 # ─── 模型管理接口 ────────────────────────────────────────────
