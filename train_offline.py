@@ -184,14 +184,27 @@ def train_full():
     # 加载数据
     records = load_data_from_excel()
     
-    # 训练模型
-    print("\n正在训练统计模型...")
+    # 按时间序列切分：前80%训练，后20%测试（避免数据泄露）
+    split = max(1, int(len(records) * 0.8))
+    train_records = records[:split]
+    test_records = records[split:]
+    print(f"\n训练集: {len(train_records)} 条，测试集: {len(test_records)} 条")
+    
+    # 用训练集训练（用于评估）
+    print("正在训练统计模型...")
+    model_eval = TraumaStatisticalModel()
+    model_eval.fit(train_records)
+    
+    # 在测试集上评估（out-of-sample）
+    print("正在评估模型（测试集）...")
+    metrics = evaluate_model(model_eval, test_records)
+    metrics['train_count'] = len(train_records)
+    metrics['test_count'] = len(test_records)
+    
+    # 用全量数据重训最终模型（覆盖最新数据）
+    print("正在用全量数据训练最终模型...")
     model = TraumaStatisticalModel()
     model.fit(records)
-    
-    # 评估
-    print("正在评估模型...")
-    metrics = evaluate_model(model, records)
     
     # 生成版本号
     version = f"v1_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}"
