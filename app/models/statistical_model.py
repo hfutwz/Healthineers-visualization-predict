@@ -157,6 +157,69 @@ class TraumaStatisticalModel:
                 result[d] += v
         return dict(result)
 
+    def district_by_period_cause_optional(
+        self,
+        time_period: Optional[int] = None,
+        injury_cause: Optional[int] = None,
+    ) -> dict:
+        """
+        类型4 全选版：时段/伤因任一为 None 表示全选，汇总后返回各区计数。
+        """
+        result = defaultdict(int)
+        for (d, p, c), v in self.district_period_cause.items():
+            if time_period is not None and p != time_period:
+                continue
+            if injury_cause is not None and c != injury_cause:
+                continue
+            result[d] += v
+        # 若 district_period_cause 中无数据，回退到 district_cause
+        if not result:
+            for (d, c), v in self.district_cause.items():
+                if injury_cause is not None and c != injury_cause:
+                    continue
+                result[d] += v
+        return dict(result)
+
+    def all_causes_time_distribution(self) -> dict:
+        """全部伤因汇总 → 各时段分布（injury_cause 全选时使用）"""
+        counts = {p: 0 for p in range(6)}
+        for (p, c), v in self.period_cause.items():
+            counts[p] = counts.get(p, 0) + v
+        return self._normalize_generic(counts)
+
+    def all_causes_season_distribution(self) -> dict:
+        """全部伤因汇总 → 各季节分布（injury_cause 全选时使用）"""
+        counts = {s: 0 for s in range(4)}
+        for (s, c), v in self.season_cause.items():
+            counts[s] = counts.get(s, 0) + v
+        return self._normalize_generic(counts)
+
+    def district_profile_all(self) -> dict:
+        """
+        全市汇总的时段/季节/伤因分布（district 全选时使用）。
+        """
+        n_p = {p: 0 for p in range(6)}
+        n_s = {s: 0 for s in range(4)}
+        n_c = {c: 0 for c in range(5)}
+
+        for (p, c), v in self.period_cause.items():
+            n_p[p] = n_p.get(p, 0) + v
+        for (s, c), v in self.season_cause.items():
+            n_s[s] = n_s.get(s, 0) + v
+        for c, v in self.total_cause.items():
+            n_c[c] = v
+
+        period_norm = self._normalize_generic(n_p)
+        season_norm = self._normalize_generic(n_s)
+        cause_norm = self._normalize_generic(n_c)
+
+        return {
+            'district': '全市',
+            'period': {TIME_PERIOD_NAMES[p]: round(period_norm.get(p, 0.0), 4) for p in range(6)},
+            'season': {SEASON_NAMES[s]: round(season_norm.get(s, 0.0), 4) for s in range(4)},
+            'causes': {CAUSE_NAMES[c]: round(cause_norm.get(c, 0.0), 4) for c in range(5)},
+        }
+
     def predict_comprehensive_optional(
         self,
         time_period: Optional[int] = None,
