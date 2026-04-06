@@ -99,29 +99,40 @@ def _do_train(force: bool = False) -> dict:
     # 特征构建
     records = [build_record(r) for r in raw_records]
 
-    # 训练统计层
-    model = TraumaStatisticalModel()
-    model.fit(records)
+    # 按时间顺序切分：前80%训练，后20%测试（时间序列切分，避免数据泄露）
+    split = max(1, int(len(records) * 0.8))
+    train_records = records[:split]
+    test_records = records[split:]
 
-    # 评估
-    metrics = _evaluate(model, records)
+    # 用训练集训练统计层
+    model = TraumaStatisticalModel()
+    model.fit(train_records)
+
+    # 在测试集上评估（out-of-sample）
+    metrics = _evaluate(model, test_records)
+    metrics['train_count'] = len(train_records)
+    metrics['test_count'] = len(test_records)
+
+    # 评估完后用全量数据重训（让模型覆盖最新数据）
+    model_full = TraumaStatisticalModel()
+    model_full.fit(records)
 
     # 版本号
     version_num = meta.get('version_num', 0) + 1
     version = f"v{version_num}_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}"
 
-    # 保存本次版本（带时间戳）
+    # 保存本次版本（带时间戳）——保存全量训练的模型
     os.makedirs(MODEL_DIR, exist_ok=True)
     versioned_pkl  = os.path.join(MODEL_DIR, f"{version}.pkl")
     versioned_meta = os.path.join(MODEL_DIR, f"{version}.meta.json")
-    model.save(versioned_pkl)
+    model_full.save(versioned_pkl)
 
     new_meta = {
         'version': version,
         'version_num': version_num,
         'trained_count': current_n,
         'delta': delta,
-        'district_count': model.meta['district_count'],
+        'district_count': model_full.meta['district_count'],
         'created_at': datetime.datetime.now().isoformat(),
         'metrics': metrics,
         'features': [f[0] for f in FEATURE_CONFIG],
@@ -129,8 +140,8 @@ def _do_train(force: bool = False) -> dict:
     with open(versioned_meta, 'w', encoding='utf-8') as f:
         json.dump(new_meta, f, ensure_ascii=False, indent=2)
 
-    # 覆盖 current（current.pkl / current.meta.json）
-    model.save(MODEL_FILE)
+    # 覆盖 current（current.pkl / current.meta.json）——用全量模型
+    model_full.save(MODEL_FILE)
     _save_meta(new_meta)
 
     return {
