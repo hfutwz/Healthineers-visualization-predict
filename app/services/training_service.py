@@ -75,8 +75,99 @@ def train_full() -> dict:
 
 
 def incremental_update() -> dict:
-    """增量更新：新增记录达到阈值才触发"""
+    """增量更新（旧接口：Python自己连数据库判断）"""
     return _do_train(force=False)
+
+
+def incremental_push(new_records: list[dict]) -> dict:
+    """
+    增量推送训练（新接口）：Java 将新增记录直接推送过来，不连数据库。
+    策略：加载当前模型的内部计数表 → 合并新记录 → 用全量数据重拟合 → 保存新版本。
+    """
+    if not new_records:
+        return {'status': 'skipped', 'reason': '没有新数据', 'count': 0}
+
+    # 加载现有模型
+    current = load_current_model()
+    if current is None:
+        return {'status': 'error', 'reason': '基础模型不存在，请先执行全量训练'}
+
+    # 从现有模型重建"虚拟记录列表"（从计数表还原）以便合并新数据后重拟合
+    existing_records = _expand_model_to_records(current)
+
+    # 合并：已有记录 + 新记录
+    all_records = existing_records + new_records
+
+    # 重新拟合
+    model = TraumaStatisticalModel()
+    model.fit(all_records)
+
+    # 评估（用新记录作为测试集，sample量少时直接记录）
+    if len(new_records) >= 10:
+        metrics = _evaluate(model, new_records)
+    else:
+        metrics = {'top1_accuracy': None, 'sample_count': len(new_records), 'note': '新增样本过少，跳过评估'}
+
+    # 版本管理
+    meta = _load_meta()
+    version_num = meta.get('version_num', 0) + 1
+    version = f"v{version_num}_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}_incr"
+
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    versioned_pkl  = os.path.join(MODEL_DIR, f"{version}.pkl")
+    versioned_meta = os.path.join(MODEL_DIR, f"{version}.meta.json")
+    model.save(versioned_pkl)
+
+    new_meta = {
+        'version': version,
+        'version_num': version_num,
+        'trained_count': len(all_records),
+        'sample_count': len(all_records),
+        'delta': len(new_records),
+        'district_count': model.meta['district_count'],
+        'created_at': datetime.datetime.now().isoformat(),
+        'metrics': metrics,
+        'features': [f[0] for f in FEATURE_CONFIG],
+        'incremental': True,
+    }
+    with open(versioned_meta, 'w', encoding='utf-8') as f:
+        json.dump(new_meta, f, ensure_ascii=False, indent=2)
+
+    model.save(MODEL_FILE)
+    _save_meta(new_meta)
+
+    return {
+        'status': 'success',
+        'version': version,
+        'delta': len(new_records),
+        'trained_count': len(all_records),
+        'metrics': metrics,
+    }
+
+
+def _expand_model_to_records(model: "TraumaStatisticalModel") -> list[dict]:
+    """
+    从模型内部计数表还原虚拟记录列表（用于合并后重拟合）。
+    优先用 district_period_cause（最细粒度），补充 period_season_cause。
+    """
+    records = []
+
+    # 1. 从 district_period_cause 还原（带地区的记录）
+    seen_pc = {}  # 记录 (period, cause) 已从这里贡献了多少
+    for (d, p, c), count in model.district_period_cause.items():
+        for _ in range(count):
+            records.append({'time_period': p, 'season': -1, 'district': d, 'injury_cause_category': c})
+        seen_pc[(p, c)] = seen_pc.get((p, c), 0) + count
+
+    # 2. 从 period_season_cause 还原缺少地区信息的记录（补差值）
+    for (p, s, c), count in model.period_season_cause.items():
+        already = seen_pc.get((p, c), 0)
+        extra = count - already
+        if extra > 0:
+            for _ in range(extra):
+                records.append({'time_period': p, 'season': s, 'district': None, 'injury_cause_category': c})
+
+    return records
 
 
 def _do_train(force: bool = False) -> dict:
