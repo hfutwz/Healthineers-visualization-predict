@@ -13,6 +13,12 @@ CAUSE_NAMES = {0: '交通伤', 1: '高坠伤', 2: '机械伤', 3: '跌倒', 4: '
 TIME_PERIOD_NAMES = {0: '夜间', 1: '早高峰', 2: '午高峰', 3: '下午', 4: '晚高峰', 5: '晚上'}
 SEASON_NAMES = {0: '春', 1: '夏', 2: '秋', 3: '冬'}
 
+# 与前端 predictionOptions 一致，用于接口校验
+ALLOWED_DISTRICTS = frozenset({
+    '黄浦区', '徐汇区', '长宁区', '静安区', '普陀区', '虹口区', '杨浦区', '浦东新区',
+    '闵行区', '宝山区', '嘉定区', '金山区', '松江区', '青浦区', '奉贤区', '崇明区',
+})
+
 
 class TraumaStatisticalModel:
 
@@ -143,6 +149,92 @@ class TraumaStatisticalModel:
                 result[d] += v
         return dict(result)
 
+    def district_by_period_cause(self, time_period: int, injury_cause: int) -> dict:
+        """某时段 + 某伤因 → 各行政区原始计数（类型 4）"""
+        result = defaultdict(int)
+        for (d, p, c), v in self.district_period_cause.items():
+            if p == time_period and c == injury_cause:
+                result[d] += v
+        return dict(result)
+
+    def predict_comprehensive_optional(
+        self,
+        time_period: Optional[int] = None,
+        season: Optional[int] = None,
+        district: Optional[str] = None,
+    ) -> dict:
+        """
+        综合伤因概率：时段 / 季节 / 地区任一项可为 None 表示「全部」并在该维上边际化或合理组合。
+        """
+        d = (district or '').strip() or None
+        p_set = time_period is not None
+        s_set = season is not None
+        d_set = d is not None
+
+        if d_set and p_set and s_set:
+            return self.predict_by_district_period_season(d, time_period, season)
+        if d_set and p_set:
+            return self.predict_by_district_period(d, time_period)
+        if d_set and s_set and not p_set:
+            return self._merge_proba_int_keys(self.predict_by_district(d), self.predict_by_season(season))
+        if d_set and not p_set and not s_set:
+            return self.predict_by_district(d)
+        if not d_set and p_set and s_set:
+            return self.predict_by_period_season(time_period, season)
+        if not d_set and p_set:
+            return self.predict_by_period(time_period)
+        if not d_set and not p_set and s_set:
+            return self.predict_by_season(season)
+        return self._global()
+
+    def district_profile(self, district: str) -> dict:
+        """
+        类型 3：某地区 → 时段占比、季节占比、伤因占比（季节在无联合表时用 P(季|时段)×P(时段|地区) 近似）。
+        """
+        d = district.strip()
+        n_dp = {p: 0 for p in range(6)}
+        n_c = {c: 0 for c in range(5)}
+        for (dist, p, c), v in self.district_period_cause.items():
+            if dist != d:
+                continue
+            n_dp[p] += v
+            n_c[c] += v
+        tot = sum(n_c.values())
+        if tot <= 0:
+            return {}
+
+        period_raw = self._normalize_generic({p: n_dp[p] for p in range(6)})
+        period = {TIME_PERIOD_NAMES[p]: round(period_raw.get(p, 0.0), 4) for p in range(6)}
+
+        n_ps = defaultdict(int)
+        for (p, s, _c), v in self.period_season_cause.items():
+            n_ps[(p, s)] += v
+        n_p_from_ps = defaultdict(int)
+        for (p, s), v in n_ps.items():
+            n_p_from_ps[p] += v
+
+        season_acc = defaultdict(float)
+        for s in range(4):
+            acc = 0.0
+            for p in range(6):
+                w = n_dp[p] / tot
+                ps = n_ps.get((p, s), 0)
+                denom = n_p_from_ps.get(p, 0) or 1
+                acc += w * (ps / denom)
+            season_acc[s] = acc
+        season_norm = self._normalize_generic(dict(season_acc))
+        season = {SEASON_NAMES[s]: round(season_norm.get(s, 0.0), 4) for s in range(4)}
+
+        cause_norm = self._normalize_generic(n_c)
+        causes = {CAUSE_NAMES[c]: round(cause_norm.get(c, 0.0), 4) for c in range(5)}
+
+        return {
+            'district': d,
+            'period': period,
+            'season': season,
+            'causes': causes,
+        }
+
     # ─────────────────────────────────────────────────────────
     # 内部工具
     # ─────────────────────────────────────────────────────────
@@ -171,6 +263,22 @@ class TraumaStatisticalModel:
         if total == 0:
             return {k: 1.0 / len(counts) for k in counts}
         return {k: round(v / total, 4) for k, v in counts.items()}
+
+    def _merge_proba_int_keys(self, a: dict, b: dict) -> dict:
+        """地区+季节（无联合表）时，对伤因概率做独立乘积再归一化。"""
+        pa = {c: float(a.get(c, 0.0)) for c in range(5)}
+        pb = {c: float(b.get(c, 0.0)) for c in range(5)}
+        w = {c: max(1e-12, pa[c]) * max(1e-12, pb[c]) for c in range(5)}
+        t = sum(w.values())
+        if t <= 0:
+            return self._global()
+        merged = {c: w[c] / t for c in range(5)}
+        sa = int(a.get('_sample_n', 0) or 0)
+        sb = int(b.get('_sample_n', 0) or 0)
+        merged['_sample_n'] = min(sa, sb) if sa and sb else (sa or sb or 1)
+        merged['_confidence'] = 'medium'
+        merged['_fallback'] = bool(a.get('_fallback')) or bool(b.get('_fallback'))
+        return merged
 
     # ─────────────────────────────────────────────────────────
     # 序列化

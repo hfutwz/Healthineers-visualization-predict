@@ -5,9 +5,9 @@
 
 from typing import Optional
 from fastapi import APIRouter, Query, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
-from app.models.statistical_model import TraumaStatisticalModel, CAUSE_NAMES
+from app.models.statistical_model import TraumaStatisticalModel, CAUSE_NAMES, ALLOWED_DISTRICTS
 from app.services import training_service
 
 router = APIRouter()
@@ -35,6 +35,13 @@ def reload_model():
 
 
 # ─── 格式化工具 ──────────────────────────────────────────────
+
+def _normalize_district_param(district: str) -> str:
+    d = (district or '').strip()
+    if d not in ALLOWED_DISTRICTS:
+        raise HTTPException(status_code=422, detail=f"地区不在允许列表内: {district!r}")
+    return d
+
 
 def _fmt(raw: dict) -> dict:
     """统一格式化伤因概率响应（使用内存缓存的版本号，避免磁盘 IO）"""
@@ -76,34 +83,33 @@ def cause_by_season(
 def cause_by_district(
     district: str = Query(..., description="上海行政区，如'宝山区'"),
 ):
-    return _fmt(get_model().predict_by_district(district))
+    d = _normalize_district_param(district)
+    return _fmt(get_model().predict_by_district(d))
 
 
 class ComprehensiveQuery(BaseModel):
-    time_period: int
-    season: Optional[int] = None
+    """time_period / season / district 均可为 null 表示「全部」，三维同时为空则返回全局伤因分布。"""
+
+    model_config = ConfigDict(extra='ignore')
+
+    time_period: Optional[int] = Field(default=None, ge=0, le=5)
+    season: Optional[int] = Field(default=None, ge=0, le=3)
     district: Optional[str] = None
 
 
-@router.post("/predict/comprehensive", summary="T1: 综合预测（区域+时段+季节）")
+@router.post("/predict/comprehensive", summary="T1: 综合预测（区域+时段+季节，支持「全部」）")
 def comprehensive(body: ComprehensiveQuery):
-    """
-    优先级：区域+时段+季节 > 区域+时段 > 时段+季节 > 时段
-    地区数据稀疏时自动降级，附带置信度说明
-    """
     m = get_model()
-    if body.district and body.season is not None:
-        # 三维：区域 + 时段 + 季节（内部逐级降级到区域+时段）
-        raw = m.predict_by_district_period_season(body.district, body.time_period, body.season)
-    elif body.district:
-        # 二维：区域 + 时段
-        raw = m.predict_by_district_period(body.district, body.time_period)
-    elif body.season is not None:
-        # 二维：时段 + 季节
-        raw = m.predict_by_period_season(body.time_period, body.season)
+    district = body.district
+    if district is not None and str(district).strip():
+        district = _normalize_district_param(str(district))
     else:
-        # 一维：仅时段
-        raw = m.predict_by_period(body.time_period)
+        district = None
+    raw = m.predict_comprehensive_optional(
+        time_period=body.time_period,
+        season=body.season,
+        district=district,
+    )
     return _fmt(raw)
 
 
@@ -127,6 +133,26 @@ def district_distribution(
     injury_cause: Optional[int] = Query(None, ge=0, le=4),
 ):
     return get_model().district_distribution(injury_cause)
+
+
+@router.get("/predict/district-profile", summary="类型3: 地区→时段/季节/伤因分布")
+def district_profile(
+    district: str = Query(..., description="上海行政区"),
+):
+    d = _normalize_district_param(district)
+    m = get_model()
+    out = m.district_profile(d)
+    if not out:
+        raise HTTPException(status_code=404, detail=f"地区 {d} 无统计数据")
+    return out
+
+
+@router.get("/predict/district-by-period-cause", summary="类型4: 时段+伤因→地区分布")
+def district_by_period_cause(
+    time_period: int = Query(..., ge=0, le=5),
+    injury_cause: int = Query(..., ge=0, le=4),
+):
+    return get_model().district_by_period_cause(time_period, injury_cause)
 
 
 # ─── 模型管理接口 ────────────────────────────────────────────
