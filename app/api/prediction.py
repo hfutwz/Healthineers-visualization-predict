@@ -156,7 +156,11 @@ def district_profile(
         d = _normalize_district_param(district)
         out = m.district_profile(d)
         if not out:
-            raise HTTPException(status_code=404, detail=f"地区 {d} 无统计数据")
+            return {
+                "no_data": True,
+                "district": district,
+                "reason": f"该地区（{district}）暂无历史创伤数据，无法生成画像"
+            }
     return out
 
 
