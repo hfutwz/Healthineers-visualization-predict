@@ -184,9 +184,73 @@ def model_train():
     return result
 
 
-@router.post("/api/model/trigger-update", summary="增量更新（导入新数据后调用）")
+@router.post("/api/model/trigger-update", summary="增量更新（旧接口兼容，需Python可达数据库）")
 def trigger_update():
     result = training_service.incremental_update()
+    if result.get('status') == 'success':
+        reload_model()
+    return result
+
+
+class IncrementalRecord(BaseModel):
+    """Java 推送的单条 injuryrecord 记录（字段与数据库一致）"""
+    model_config = ConfigDict(extra='ignore')
+
+    admission_date: Optional[str] = None       # 接诊日期 "2024-10-29"
+    admission_time: Optional[str] = None       # 接诊时间 "1100"
+    time_period: Optional[int] = None          # 已由Java计算好（0-5）
+    season: Optional[int] = None               # 已由Java计算好（0-3）
+    injury_cause_category: Optional[int] = None  # 0-4
+    injury_location: Optional[str] = None      # 创伤发生地文本
+
+
+class IncrementalRequest(BaseModel):
+    model_config = ConfigDict(extra='ignore')
+    records: list[IncrementalRecord] = []
+
+
+@router.post("/api/model/incremental", summary="增量更新（Java推送新数据，不依赖数据库）")
+def incremental_push(body: IncrementalRequest):
+    """
+    Java 导入新数据后，将新增的 injuryrecord 记录推送到此接口。
+    Python 直接用这批数据做增量训练，无需连接数据库。
+    """
+    if not body.records:
+        return {'status': 'skipped', 'reason': '没有新数据', 'count': 0}
+
+    from app.models.feature_builder import _normalize_cause, _resolve_district
+    from app.models.statistical_model import TraumaStatisticalModel
+
+    # 转换为模型输入格式
+    new_records = []
+    for r in body.records:
+        # time_period / season 由 Java 已计算，直接用
+        p = r.time_period if r.time_period is not None else -1
+        s = r.season if r.season is not None else -1
+        c = _normalize_cause(r.injury_cause_category) if r.injury_cause_category is not None \
+            else _normalize_cause(None)
+        d = _resolve_district(r.injury_location) if r.injury_location else None
+
+        if p < 0 or c is None:
+            continue  # 缺关键字段跳过
+
+        new_records.append({
+            'time_period': p,
+            'season': s,
+            'district': d,
+            'injury_cause_category': c,
+        })
+
+    if not new_records:
+        return {'status': 'skipped', 'reason': '推送数据缺少必要字段（time_period/injury_cause_category）', 'count': 0}
+
+    # 加载当前模型，合并新数据后重训
+    current = training_service.load_current_model()
+    if current is None:
+        return {'status': 'error', 'reason': '基础模型不存在，请先执行全量训练 POST /api/model/train'}
+
+    # 读取当前模型已有的所有计数数据，合并新记录后重训
+    result = training_service.incremental_push(new_records)
     if result.get('status') == 'success':
         reload_model()
     return result
