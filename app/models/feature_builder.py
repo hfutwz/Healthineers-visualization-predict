@@ -24,13 +24,25 @@ def _parse_year_offset(date_val, base=2024) -> int:
 
 
 def _normalize_cause(val) -> int:
-    """伤因归类：'其他:...' 系列全部归入 4"""
+    """
+    伤因归类：数据库存整数（0-4），Excel文本存中文字符串。
+    两种格式都支持，未知值归入 4（其他）。
+    """
     if val is None:
         return 4
-    s = str(val)
+    # 数据库整数直通（最常见路径）
+    if isinstance(val, int) and 0 <= val <= 4:
+        return val
+    s = str(val).strip()
+    # 整数字符串
+    if s.isdigit():
+        n = int(s)
+        if 0 <= n <= 4:
+            return n
+    # 中文文本（Excel 导入路径）
     mapping = {'交通伤': 0, '高坠伤': 1, '机械伤': 2, '跌倒': 3}
     for k, v in mapping.items():
-        if s == k:
+        if s == k or s.startswith(k):
             return v
     return 4   # 其他
 
